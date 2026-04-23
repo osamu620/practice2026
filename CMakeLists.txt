@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.25)
+project(PRACTICE LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(OpenCV REQUIRED)
+add_executable(cvtest cvtest.cpp)
+target_include_directories(cvtest PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(cvtest ${OpenCV_LIBS})
