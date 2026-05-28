@@ -45,7 +45,7 @@ cv::Mat rgb2ycbcr(cv::Mat img) {
 }
 
 template <int X>
-void quantize(cv::Mat &blk, const float *qtable, int quality = 75) {
+void quantize(cv::Mat &blk, const float *qtable, float scale) {
   const int width = blk.cols;
   const int height = blk.rows;
   const int nc = blk.channels();
@@ -54,7 +54,7 @@ void quantize(cv::Mat &blk, const float *qtable, int quality = 75) {
   for (int i = 0; i < height; ++i) {
     for (int j = 0; j < width; ++j) {
       auto val = pixel[i * stride + j];
-      auto stepsize = clamp<float>(qtable[i * stride + j]);
+      auto stepsize = clamp<float>(qtable[i * stride + j] * scale);
       // 以下のif文はコンパイル時には消える
       if (X == 0)  // 量子化
         pixel[i * stride + j] = roundf(val / stepsize);
@@ -64,7 +64,7 @@ void quantize(cv::Mat &blk, const float *qtable, int quality = 75) {
   }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
   cv::Mat image = cv::imread("./barbara.ppm", cv::IMREAD_ANYCOLOR);
   if (image.empty()) return EXIT_FAILURE;
 
@@ -76,6 +76,24 @@ int main() {
   cv::split(image, ycrcb);  // [0] -> Y, [1] -> Cr, [2] -> Cb
   cv::resize(ycrcb[1], ycrcb[1], cv::Size(), 0.5, 0.5);  // 444 -> 420
   cv::resize(ycrcb[2], ycrcb[2], cv::Size(), 0.5, 0.5);  // 444 -> 420
+
+  // quality -> Qfactor -> scale
+  int QF;
+  int quality;
+  if (argc < 2) {
+    quality = 75;
+  } else {
+    quality = std::stoi(argv[1]);
+  }
+  quality = (quality == 0) ? 1 : quality;
+  quality = (quality > 100) ? 100 : quality;
+  if (quality <= 50) {
+    QF = 5000 / quality;
+  } else {
+    QF = 200 - 2 * quality;
+  }
+  QF = (QF == 0) ? 1 : QF;
+  float scale = QF / 100.0f;
 
   for (int c = 0; c < nc; ++c) {
     const int width = ycrcb[c].cols;
@@ -90,9 +108,9 @@ int main() {
         // Forward DCT
         cv::dct(blk, blk, FWD);
         // 量子化
-        quantize<FWD>(blk, qmatrix[c > 0]);
+        quantize<FWD>(blk, qmatrix[c > 0], scale);
         // 逆量子化
-        quantize<INV>(blk, qmatrix[c > 0]);
+        quantize<INV>(blk, qmatrix[c > 0], scale);
         // Inverse DCT
         cv::dct(blk, blk, INV);
         blk += 128.0f;
