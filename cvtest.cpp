@@ -1,6 +1,7 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 
+#include "bitstream.hpp"
 #include "huffman_tables.hpp"
 #include "qtable.hpp"
 #include "zigzag.hpp"
@@ -72,7 +73,7 @@ void quantize(cv::Mat &blk, const float *qtable, float scale) {
 
 template <int X>
 void encode(int run, int val, const unsigned int *t_cwd,
-            const unsigned int *t_len) {
+            const unsigned int *t_len, bitstream &encbuf) {
   int s = 0;
   int uval = (val < 0) ? -val : val;
   int bound = 1;
@@ -83,20 +84,24 @@ void encode(int run, int val, const unsigned int *t_cwd,
   if (X == 0) {
     // DC
     // t_cwd[s] を t_len[s]　ビットの値としてビットストリームに書き込む
+    encbuf.put_bits(t_cwd[s], t_len[s]);
   } else {
     // AC
     // t_cwd[(run << 4) + s] を t_len[(run << 4) +
     // s]　ビットの値としてビットストリームに書き込む
+    encbuf.put_bits(t_cwd[(run << 4) + s], t_len[(run << 4) + s]);
   }
   if (s != 0) {
     val = (val < 0) ? val - 1 : val;
   }
   // val を sビットの値としてビットストリームに書き込む
+  encbuf.put_bits(val, s);
 }
 
 int main(int argc, char *argv[]) {
   cv::Mat image = cv::imread("./barbara.ppm", cv::IMREAD_ANYCOLOR);
   if (image.empty()) return EXIT_FAILURE;
+  bitstream encbuf;
 
   const int nc = image.channels();
 
@@ -130,7 +135,7 @@ int main(int argc, char *argv[]) {
   float scale = QF / 100.0f;
 
   auto blkproc = [](cv::Mat &tmp, const float *qmatrix, float scale,
-                    int &prev_dc, int c) {
+                    int &prev_dc, int c, bitstream &encbuf) {
     cv::Mat blk;
     tmp.convertTo(blk, CV_32F);
     blk -= 128.0f;
@@ -143,7 +148,7 @@ int main(int argc, char *argv[]) {
     // 現在のブロックのDC成分から前のブロックのDC成分を引く
     int diff = p[0] - prev_dc;
     prev_dc = p[0];  // prev_dcを更新
-    encode<DC>(0, diff, DC_cwd[c], DC_len[c]);
+    encode<DC>(0, diff, DC_cwd[c], DC_len[c], encbuf);
 
     // AC成分のためのジグザグスキャン・ハフマン符号化
     int zero_run = 0;  // 0の連続数
@@ -154,16 +159,16 @@ int main(int argc, char *argv[]) {
       } else {
         while (zero_run > 15) {
           // ZRL
-          encode<AC>(0xf, 0x0, AC_cwd[c], AC_len[c]);
+          encode<AC>(0xf, 0x0, AC_cwd[c], AC_len[c], encbuf);
           zero_run -= 16;
         }
-        encode<AC>(zero_run, ac, AC_cwd[c], AC_len[c]);
+        encode<AC>(zero_run, ac, AC_cwd[c], AC_len[c], encbuf);
         zero_run = 0;
       }
     }
     if (zero_run) {
       // EOB
-      encode<AC>(0x0, 0x0, AC_cwd[c], AC_len[c]);
+      encode<AC>(0x0, 0x0, AC_cwd[c], AC_len[c], encbuf);
     }
 
     // 逆量子化
@@ -186,16 +191,19 @@ int main(int argc, char *argv[]) {
         for (int j = 0; j < dH; ++j) {
           // 起点の座標(x, y)で、8x8の領域を切り出す
           cv::Mat tmpY = ycrcb[0](cv::Rect(x + j * 8, y + i * 8, 8, 8));
-          blkproc(tmpY, qmatrix[Luma], scale, prev_dc[0], Luma);
+          blkproc(tmpY, qmatrix[Luma], scale, prev_dc[0], Luma, encbuf);
         }
         // 起点の座標(cx, cy)で、8x8の領域を切り出す
         cv::Mat tmpCr = ycrcb[1](cv::Rect(cx, cy, 8, 8));  // Cr
-        blkproc(tmpCr, qmatrix[Chroma], scale, prev_dc[1], Chroma);
+        blkproc(tmpCr, qmatrix[Chroma], scale, prev_dc[1], Chroma, encbuf);
         cv::Mat tmpCb = ycrcb[2](cv::Rect(cx, cy, 8, 8));  // Cb
-        blkproc(tmpCb, qmatrix[Chroma], scale, prev_dc[2], Chroma);
+        blkproc(tmpCb, qmatrix[Chroma], scale, prev_dc[2], Chroma, encbuf);
       }
     }
   }
+
+  size_t length = encbuf.finalize();
+  std::cout << "codestream size = " << length << std::endl;
 
   cv::resize(ycrcb[1], ycrcb[1], cv::Size(), dH, dV);
   cv::resize(ycrcb[2], ycrcb[2], cv::Size(), dH, dV);
