@@ -23,6 +23,10 @@ class bitstream {
       len--;
       if (bits == 8) {
         put_byte(tmp);
+        if (tmp == 0xFF) {
+          // バイトスタッフィング処理
+          put_byte(0x00);
+        }
         tmp = 0;
         bits = 0;
       }
@@ -32,20 +36,24 @@ class bitstream {
     tmp = tmp << (8 - bits);     // 上位へ寄せる
     tmp = tmp | (0xFF >> bits);  // 下位bitを1で埋める
     put_byte(tmp);
-  }
-
-  inline void put_byte(uint8_t val) {
-    stream.push_back(val);
-    if (val == 0xFF) {
+    if (tmp == 0xFF) {
       // バイトスタッフィング処理
-      stream.push_back(0x00);
+      put_byte(0x00);
     }
   }
 
-  void put_word(uint16_t val) {}
+  inline void put_byte(uint8_t val) { stream.push_back(val); }
+
+  inline void put_word(uint16_t val) {
+    // Big endian
+    put_byte(val >> 8);
+    put_byte(val & 0xFF);
+  }
 
   size_t finalize() {
     flush();
     return stream.size();
   }
+
+  uint8_t* get_data() { return stream.data(); }
 };

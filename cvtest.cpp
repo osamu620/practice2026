@@ -3,7 +3,9 @@
 
 #include "bitstream.hpp"
 #include "huffman_tables.hpp"
+#include "jpgheaders.hpp"
 #include "qtable.hpp"
+#include "ycctype.hpp"
 #include "zigzag.hpp"
 
 constexpr int FWD = 0;
@@ -52,7 +54,7 @@ cv::Mat rgb2ycbcr(cv::Mat img) {
 }
 
 template <int X>
-void quantize(cv::Mat &blk, const float *qtable, float scale) {
+void quantize(cv::Mat &blk, int *qtable) {
   const int width = blk.cols;
   const int height = blk.rows;
   const int nc = blk.channels();
@@ -61,7 +63,7 @@ void quantize(cv::Mat &blk, const float *qtable, float scale) {
   for (int i = 0; i < height; ++i) {
     for (int j = 0; j < width; ++j) {
       auto val = pixel[i * stride + j];
-      auto stepsize = clamp<float>(qtable[i * stride + j] * scale);
+      auto stepsize = clamp<int>(qtable[i * stride + j]);
       // 以下のif文はコンパイル時には消える
       if (X == 0)  // 量子化
         pixel[i * stride + j] = roundf(val / stepsize);
@@ -110,12 +112,35 @@ int main(int argc, char *argv[]) {
   std::vector<cv::Mat> ycrcb;
   cv::split(image, ycrcb);  // [0] -> Y, [1] -> Cr, [2] -> Cb
 
-  int dH = 2, dV = 2;  // 4:2:0
+  int YCCtype = YUV420;
+  if (argc > 2) {
+    if (!strcmp("444", argv[2])) {
+      YCCtype = YUV444;
+    } else if (!strcmp("422", argv[2])) {
+      YCCtype = YUV422;
+    } else if (!strcmp("411", argv[2])) {
+      YCCtype = YUV411;
+    } else if (!strcmp("440", argv[2])) {
+      YCCtype = YUV440;
+    } else if (!strcmp("420", argv[2])) {
+      YCCtype = YUV420;
+    } else if (!strcmp("410", argv[2])) {
+      YCCtype = YUV410;
+    } else if (!strcmp("GRAY", argv[2])) {
+      YCCtype = GRAY;
+    } else {
+      printf("Unknown YCC type\n");
+      exit(EXIT_FAILURE);
+    }
+  }
+  int dH = YCC_HV[YCCtype][0] >> 4, dV = YCC_HV[YCCtype][0] & 0x0F;
   cv::resize(ycrcb[1], ycrcb[1], cv::Size(), 1.0f / dH,
              1.0f / dV);  // 444 -> 420
   cv::resize(ycrcb[2], ycrcb[2], cv::Size(), 1.0f / dH,
              1.0f / dV);  // 444 -> 420
 
+  const int width = ycrcb[0].cols;
+  const int height = ycrcb[0].rows;
   // quality -> Qfactor -> scale
   int QF;
   int quality;
@@ -134,15 +159,27 @@ int main(int argc, char *argv[]) {
   QF = (QF == 0) ? 1 : QF;
   float scale = QF / 100.0f;
 
-  auto blkproc = [](cv::Mat &tmp, const float *qmatrix, float scale,
-                    int &prev_dc, int c, bitstream &encbuf) {
+  int qtable[2][64];
+  for (int i = 0; i < 64; ++i) {
+    if (QF != 1) {
+      qtable[0][i] = static_cast<int>(clamp<float>(qmatrix[0][i] * scale));
+      qtable[1][i] = static_cast<int>(clamp<float>(qmatrix[1][i] * scale));
+    } else {
+      qtable[0][i] = qtable[1][i] = 1;
+    }
+  }
+
+  encbuf.put_word(0xFFD8);  // SOI marker
+  create_mainheader(width, height, nc, qtable[0], qtable[1], YCCtype, encbuf);
+  auto blkproc = [](cv::Mat &tmp, int *qmatrix, int &prev_dc, int c,
+                    bitstream &encbuf) {
     cv::Mat blk;
     tmp.convertTo(blk, CV_32F);
     blk -= 128.0f;
     // Forward DCT
     cv::dct(blk, blk, FWD);
     // 量子化
-    quantize<FWD>(blk, qmatrix, scale);
+    quantize<FWD>(blk, qmatrix);
 
     auto p = reinterpret_cast<float *>(blk.data);
     // 現在のブロックのDC成分から前のブロックのDC成分を引く
@@ -172,7 +209,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 逆量子化
-    quantize<INV>(blk, qmatrix, scale);
+    quantize<INV>(blk, qmatrix);
     // Inverse DCT
     cv::dct(blk, blk, INV);
     blk += 128.0f;
@@ -181,8 +218,6 @@ int main(int argc, char *argv[]) {
   };
 
   // MCU(Minimum Coded Unit)単位の処理
-  const int width = ycrcb[0].cols;
-  const int height = ycrcb[0].rows;
   // prev_dc[]には前のブロックのDC成分値が入る
   int prev_dc[3] = {0};
   for (int y = 0, cy = 0; y < height; y += 8 * dV, cy += 8) {
@@ -191,19 +226,23 @@ int main(int argc, char *argv[]) {
         for (int j = 0; j < dH; ++j) {
           // 起点の座標(x, y)で、8x8の領域を切り出す
           cv::Mat tmpY = ycrcb[0](cv::Rect(x + j * 8, y + i * 8, 8, 8));
-          blkproc(tmpY, qmatrix[Luma], scale, prev_dc[0], Luma, encbuf);
+          blkproc(tmpY, qtable[Luma], prev_dc[0], Luma, encbuf);
         }
-        // 起点の座標(cx, cy)で、8x8の領域を切り出す
-        cv::Mat tmpCr = ycrcb[1](cv::Rect(cx, cy, 8, 8));  // Cr
-        blkproc(tmpCr, qmatrix[Chroma], scale, prev_dc[1], Chroma, encbuf);
-        cv::Mat tmpCb = ycrcb[2](cv::Rect(cx, cy, 8, 8));  // Cb
-        blkproc(tmpCb, qmatrix[Chroma], scale, prev_dc[2], Chroma, encbuf);
       }
+      // 起点の座標(cx, cy)で、8x8の領域を切り出す
+      cv::Mat tmpCr = ycrcb[2](cv::Rect(cx, cy, 8, 8));  // Cb
+      blkproc(tmpCr, qtable[Chroma], prev_dc[1], Chroma, encbuf);
+      cv::Mat tmpCb = ycrcb[1](cv::Rect(cx, cy, 8, 8));  // Cr
+      blkproc(tmpCb, qtable[Chroma], prev_dc[2], Chroma, encbuf);
     }
   }
-
   size_t length = encbuf.finalize();
+  encbuf.put_word(0xFFD9);  // EOI marker
+  length += 2;
   std::cout << "codestream size = " << length << std::endl;
+  FILE *fp = fopen("out.jpg", "wb");
+  fwrite(encbuf.get_data(), sizeof(uint8_t), length, fp);
+  fclose(fp);
 
   cv::resize(ycrcb[1], ycrcb[1], cv::Size(), dH, dV);
   cv::resize(ycrcb[2], ycrcb[2], cv::Size(), dH, dV);
