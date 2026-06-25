@@ -52,6 +52,7 @@ class bitstream {
 
   size_t finalize() {
     flush();
+    put_word(0xFFD9);  // EOI marker
     return stream.size();
   }
 

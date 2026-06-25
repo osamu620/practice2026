@@ -133,6 +133,7 @@ void create_DHT(int c, bitstream &encbuf) {
 
 void create_mainheader(int width, int height, int nc, int *qtable_L,
                        int *qtable_C, int YCCtype, bitstream &encbuf) {
+  encbuf.put_word(0xFFD8);  // SOI marker
   create_DQT(0, qtable_L, encbuf);
   if (nc > 1) {
     create_DQT(1, qtable_C, encbuf);
