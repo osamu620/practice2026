@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 #include <opencv2/opencv.hpp>
 
@@ -17,6 +18,7 @@ int main(int argc, char *argv[]) {
   }
   cv::Mat image = cv::imread(argv[1], cv::IMREAD_ANYCOLOR);
   if (image.empty()) return EXIT_FAILURE;
+  cv::Mat original = image.clone();  // PSNR算出のためにオリジナルを退避
   bitstream encbuf;
 
   const int nc = image.channels();
@@ -78,12 +80,23 @@ int main(int argc, char *argv[]) {
     if (QF != 1) {
       qtable[0][i] = static_cast<int>(clamp<float>(qmatrix[0][i] * scale));
       qtable[1][i] = static_cast<int>(clamp<float>(qmatrix[1][i] * scale));
+      if (qtable[0][i] == 0) {
+        qtable[0][i] = 1;
+      }
+      if (qtable[1][i] == 0) {
+        qtable[1][i] = 1;
+      }
     } else {
       qtable[0][i] = qtable[1][i] = 1;
     }
   }
 
+  auto tic = std::chrono::high_resolution_clock::now();  // 時間計測開始
   create_mainheader(width, height, nc, qtable[0], qtable[1], YCCtype, encbuf);
+  auto toc = std::chrono::high_resolution_clock::now();  // 時間計測終了
+  size_t duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(toc - tic)
+          .count();  // 経過時間の算出
 
   // MCU(Minimum Coded Unit)単位の処理
   // prev_dc[]には前のブロックのDC成分値が入る
@@ -105,7 +118,8 @@ int main(int argc, char *argv[]) {
     }
   }
   size_t length = encbuf.finalize();
-  std::cout << "codestream size = " << length << std::endl;
+  // std::cout << "codestream size = " << length << ", ";
+  std::cout << static_cast<double>(length) * 8.0 / (width * height) << " ";
   FILE *fp = fopen(argv[2], "wb");
   if (fp == nullptr) {
     printf("Cannot open file %s\n", argv[2]);
@@ -114,10 +128,24 @@ int main(int argc, char *argv[]) {
   fwrite(encbuf.get_data(), sizeof(uint8_t), length, fp);
   fclose(fp);
 
-  // cv::resize(ycrcb[1], ycrcb[1], cv::Size(), dH, dV);
-  // cv::resize(ycrcb[2], ycrcb[2], cv::Size(), dH, dV);
-  // cv::merge(ycrcb, image);
-  // cv::cvtColor(image, image, cv::COLOR_YCrCb2BGR);
+  cv::resize(ycrcb[1], ycrcb[1], cv::Size(), dH, dV);
+  cv::resize(ycrcb[2], ycrcb[2], cv::Size(), dH, dV);
+  cv::merge(ycrcb, image);
+  cv::cvtColor(image, image, cv::COLOR_YCrCb2BGR);
+
+  double mse = 0.0;
+  for (int i = 0; i < height; ++i) {
+    for (int j = 0; j < width; ++j) {
+      for (int c = 0; c < nc; ++c) {
+        int v0 = original.data[i * original.step + j * nc + c];
+        int v1 = image.data[i * image.step + j * nc + c];
+        mse += (v0 - v1) * (v0 - v1);
+      }
+    }
+  }
+  mse /= (width * height * nc);
+  double psnr = 10 * log10(255 * 255 / mse);
+  std::cout << psnr << std::endl;
   // cv::imshow("loaded image", image);
 
   // cv::waitKey(0);
